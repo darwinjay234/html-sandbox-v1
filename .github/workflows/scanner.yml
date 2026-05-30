@@ -1,0 +1,40 @@
+name: Crypto Market Scanner
+
+on:
+  # 1. Scheduled trigger: runs every hour (UTC)
+  # You can customize the cron schedule to your liking
+  schedule:
+    - cron: '0 * * * *'
+
+  # 2. Manual trigger: allows you to run it anytime from the GitHub website
+  workflow_dispatch:
+
+jobs:
+  run-scanner:
+    runs-on: ubuntu-latest
+
+    steps:
+    # Step 1: Download the repository code
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    # Step 2: Install Python
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    # Step 3: Install required libraries
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    # Step 4: Run the scanner
+    # The webhook URL is securely pulled from GitHub Secrets and injected
+    # as an environment variable, completely hiding it from the public.
+    - name: Execute Scanner
+      env:
+        ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+      run: |
+        python crypto_scanner.py --watchlist
