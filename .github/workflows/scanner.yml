@@ -12,6 +12,8 @@ on:
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
     steps:
     # Step 1: Download the repository code
