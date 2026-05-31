@@ -716,7 +716,13 @@ def evaluate_trading_system(
     stop_override: Optional[float] = None,
     resistance_override: Optional[float] = None,
     use_mock_data: bool = False,
-    force_sell: bool = False
+    force_sell: bool = False,
+    # Pre-fetched shared data — passed from watchlist runner so BTC and
+    # Fear & Greed are only fetched ONCE per full scan, not once per coin.
+    # This cuts API calls from 15 down to 11 and avoids 429 rate limits.
+    btc_price_cached: Optional[float] = None,
+    btc_ema_cached: Optional[float] = None,
+    fear_greed_cached: Optional[int] = None,
 ) -> Dict[str, Any]:
 
     report = {
@@ -727,7 +733,9 @@ def evaluate_trading_system(
     }
 
     logger.info(f"=== Running 10-Indicator Scan on {coin_id.upper()} ===")
-    fear_greed = fetch_fear_greed_index()
+
+    # Use cached Fear & Greed if already fetched this run
+    fear_greed = fear_greed_cached if fear_greed_cached is not None else fetch_fear_greed_index()
 
     if use_mock_data:
         btc_daily, coin_daily, df_4h = generate_synthetic_data(coin_id)
@@ -738,16 +746,20 @@ def evaluate_trading_system(
         latest_ema50     = coin_daily.ewm(span=50,  adjust=False).mean().iloc[-1]
         latest_ema200    = coin_daily.ewm(span=200, adjust=False).mean().iloc[-1]
     else:
-        logger.info("Fetching daily BTC prices...")
-        btc_daily = get_daily_prices("bitcoin", days=250)
-        if btc_daily is None or len(btc_daily) < 200:
-            report["error"] = "Insufficient BTC daily data"; return report
-
-        latest_btc_price = btc_daily.iloc[-1]
-        latest_btc_ema   = btc_daily.ewm(span=200, adjust=False).mean().iloc[-1]
-
-        logger.info("Pacing API... sleeping 8s...")
-        time.sleep(8.0)
+        # BTC macro data — use cache if available, fetch once otherwise
+        if btc_price_cached is not None and btc_ema_cached is not None:
+            logger.info("Using cached BTC data (skipping redundant API call).")
+            latest_btc_price = btc_price_cached
+            latest_btc_ema   = btc_ema_cached
+        else:
+            logger.info("Fetching daily BTC prices...")
+            btc_daily = get_daily_prices("bitcoin", days=250)
+            if btc_daily is None or len(btc_daily) < 200:
+                report["error"] = "Insufficient BTC daily data"; return report
+            latest_btc_price = btc_daily.iloc[-1]
+            latest_btc_ema   = btc_daily.ewm(span=200, adjust=False).mean().iloc[-1]
+            logger.info("Pacing API... sleeping 15s...")
+            time.sleep(15.0)
 
         logger.info(f"Fetching daily {coin_id.upper()} prices...")
         coin_daily = get_daily_prices(coin_id, days=250)
@@ -759,8 +771,8 @@ def evaluate_trading_system(
         latest_ema50  = coin_daily.ewm(span=50,  adjust=False).mean().iloc[-1]
         latest_ema200 = coin_daily.ewm(span=200, adjust=False).mean().iloc[-1]
 
-        logger.info("Pacing API... sleeping 8s...")
-        time.sleep(8.0)
+        logger.info("Pacing API... sleeping 15s...")
+        time.sleep(15.0)
 
         logger.info(f"Fetching 4H data for {coin_id.upper()}...")
         df_4h = get_4h_dataframe(coin_id, days=30)
@@ -1005,17 +1017,53 @@ if __name__ == "__main__":
         logger.info(f"=== WATCHLIST MODE: scanning {WATCHLIST} ===")
         all_results = {}
 
+        if args.mock:
+            # Mock mode — no shared pre-fetch needed
+            btc_price_shared  = None
+            btc_ema_shared    = None
+            fear_greed_shared = None
+        else:
+            # ── Fetch BTC + Fear & Greed ONCE for the entire watchlist run ──
+            # Free CoinGecko allows ~30 calls/min. Scanning 5 coins × 3 calls
+            # each = 15 calls. Fetching BTC separately per coin would add 4
+            # extra calls and reliably triggers 429s on the daily endpoint.
+            logger.info("Pre-fetching shared BTC data and Fear & Greed Index...")
+            fear_greed_shared = fetch_fear_greed_index()
+
+            btc_daily_shared  = get_daily_prices("bitcoin", days=250)
+            if btc_daily_shared is None or len(btc_daily_shared) < 200:
+                logger.error("Could not fetch BTC daily data. Aborting watchlist run.")
+                raise SystemExit(1)
+
+            btc_price_shared = float(btc_daily_shared.iloc[-1])
+            btc_ema_shared   = float(btc_daily_shared.ewm(span=200, adjust=False).mean().iloc[-1])
+            logger.info(
+                f"Shared data ready — BTC: ${btc_price_shared:,.2f} | "
+                f"BTC EMA200: ${btc_ema_shared:,.2f} | "
+                f"Fear & Greed: {fear_greed_shared}"
+            )
+            logger.info("Pacing API... sleeping 15s before first coin scan...")
+            time.sleep(15.0)
+
         for coin in WATCHLIST:
-            result = evaluate_trading_system(coin_id=coin, use_mock_data=args.mock, force_sell=args.force_sell)
+            result = evaluate_trading_system(
+                coin_id=coin,
+                use_mock_data=args.mock,
+                force_sell=args.force_sell,
+                btc_price_cached=btc_price_shared,
+                btc_ema_cached=btc_ema_shared,
+                fear_greed_cached=fear_greed_shared,
+            )
             all_results[coin] = result
             print(f"\n--- {coin.upper()} ---")
-            print(f"  Buy Score  : {result.get('buy_score', 'N/A')}/10")
-            print(f"  Sell Score : {result.get('sell_score', 'N/A')}/10")
-            print(f"  Buy Alert  : {result.get('buy_alert_triggered', False)}")
-            print(f"  Sell Alert : {result.get('sell_alert_triggered', False)}")
+            print(f"  Buy Score    : {result.get('buy_score', 'N/A')}/10")
+            print(f"  Sell Score   : {result.get('sell_score', 'N/A')}/10")
+            print(f"  Buy Alert    : {result.get('buy_alert_triggered', False)}")
+            print(f"  Warn Alert   : {result.get('warning_alert_triggered', False)}")
+            print(f"  Sell Alert   : {result.get('sell_alert_triggered', False)}")
             if coin != WATCHLIST[-1]:
-                logger.info("Pacing API... sleeping 10s...")
-                time.sleep(10)
+                logger.info("Pacing API... sleeping 20s before next coin...")
+                time.sleep(20)
 
         # Post hourly summary to the monthly Discord log channel
         logger.info("Posting hourly summary to Discord log channel...")
