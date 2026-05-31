@@ -861,6 +861,75 @@ def evaluate_trading_system(
     return report
 
 
+def print_technical_breakdown(result: Dict[str, Any]) -> None:
+    """
+    Prints a detailed, human-readable console checklist showing exactly
+    which indicators passed or failed for the scanned asset.
+    """
+    if result.get("status") != "success":
+        print(f"  Scan failed: {result.get('error', 'Unknown error')}")
+        return
+
+    metrics = result.get("metrics", {})
+    coin_id = result.get("coin_id", "UNKNOWN").upper()
+    buy_score = result.get("buy_score", 0)
+    sell_score = result.get("sell_score", 0)
+    buy_mandatory_passed = result.get("buy_mandatory_passed", False)
+    
+    rr_ratio = metrics.get("risk_reward_ratio", 0.0)
+
+    print(f"\n==================================================")
+    print(f"*** {coin_id} TECHNICAL BREAKDOWN ***")
+    print(f"==================================================")
+    print(f"  Current Price: ${metrics.get('current_price', 0.0):,.2f} USD")
+    print(f"  Fear & Greed : {metrics.get('fear_greed', 'N/A')}")
+    print(f"--------------------------------------------------")
+    
+    # Buy Checklist
+    print(f"[BUY CHECKLIST] Score: {buy_score}/10 | Mandatory Filters: {'[PASS]' if buy_mandatory_passed else '[FAIL]'}")
+    buy_indicators = [
+        ("BTC Macro Filter (>200 EMA)", metrics.get("btc_above_200ema"), ""),
+        ("Daily EMA Alignment", metrics.get("buy_ema_aligned"), f"({metrics.get('ema_alignment_type')})"),
+        ("4H RSI (40-65 or <30)", metrics.get("buy_rsi"), f"(RSI: {metrics.get('rsi_4h', 0.0):.1f})"),
+        ("4H MACD Crossover", metrics.get("buy_macd"), ""),
+        ("4H Volume / OBV Spike", metrics.get("buy_volume_obv"), f"({metrics.get('volume_ratio', 0.0):.2f}x / OBV Bonus: {metrics.get('obv_bonus')})"),
+        ("4H Bollinger Bands (Lower)", metrics.get("buy_bb"), ""),
+        ("4H Stochastic RSI Cross", metrics.get("buy_stoch_rsi"), ""),
+        ("4H VWAP Support", metrics.get("buy_vwap"), ""),
+        ("Fear & Greed (20-40)", metrics.get("buy_sentiment"), ""),
+        ("ADX Trend Strength (>=25)", metrics.get("buy_adx"), f"(ADX: {metrics.get('adx', 0.0):.1f})"),
+    ]
+    
+    for name, status, extra in buy_indicators:
+        status_str = "[x] MET " if status else "[ ] --  "
+        extra_str = f" {extra}" if extra else ""
+        print(f"  * {status_str} {name}{extra_str}")
+        
+    print(f"  * [Mandatory Rule #8] Risk/Reward (>= 2.0): {'[PASS]' if metrics.get('risk_reward_pass') else '[FAIL]'} ({rr_ratio:.2f}x)")
+    print(f"--------------------------------------------------")
+    
+    # Sell Checklist
+    print(f"[SELL CHECKLIST] Score: {sell_score}/10")
+    sell_indicators = [
+        ("EMA Downtrend (<200 EMA)", metrics.get("sell_ema"), ""),
+        ("RSI Overbought (>=75 or <25 DT)", metrics.get("sell_rsi"), f"(RSI: {metrics.get('rsi_4h', 0.0):.1f})"),
+        ("MACD Bearish Crossover", metrics.get("sell_macd"), ""),
+        ("OBV Divergence (Price rise/OBV fall)", metrics.get("sell_volume_obv"), ""),
+        ("Bollinger Overextended (Upper)", metrics.get("sell_bb"), ""),
+        ("Stoch RSI Cross Down (>70)", metrics.get("sell_stoch_rsi"), ""),
+        ("VWAP Rejection", metrics.get("sell_vwap"), ""),
+        ("Sentiment Peak (>=80)", metrics.get("sell_sentiment"), ""),
+        ("ADX Choppiness (<15)", metrics.get("sell_adx"), f"(ADX: {metrics.get('adx', 0.0):.1f})"),
+        ("Whale Dumping (Inflows)", metrics.get("sell_onchain"), ""),
+    ]
+    
+    for name, status, extra in sell_indicators:
+        status_str = "[!] MET " if status else "[ ] --  "
+        extra_str = f" {extra}" if extra else ""
+        print(f"  * {status_str} {name}{extra_str}")
+    print(f"==================================================\n")
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     Entry point for AWS Lambda / cloud triggers.
@@ -921,11 +990,7 @@ if __name__ == "__main__":
             )
             all_results[coin] = result
 
-            print(f"\n--- {coin.upper()} ---")
-            print(f"  Buy Score  : {result.get('buy_score', 'N/A')}/10")
-            print(f"  Sell Score : {result.get('sell_score', 'N/A')}/10")
-            print(f"  Buy Alert  : {result.get('buy_alert_triggered', False)}")
-            print(f"  Sell Alert : {result.get('sell_alert_triggered', False)}")
+            print_technical_breakdown(result)
 
             if coin != WATCHLIST[-1]:
                 logger.info("Pacing API... sleeping 10s before next coin...")
@@ -949,5 +1014,6 @@ if __name__ == "__main__":
             force_sell=args.force_sell
         )
 
+        print_technical_breakdown(result)
         print("\n--- Pipeline Execution Report ---")
         print(json.dumps(result, indent=4))
