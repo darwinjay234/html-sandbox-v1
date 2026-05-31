@@ -82,6 +82,15 @@ MOCK_RESISTANCE_LEVELS = {
 # DISCORD BOT HELPERS
 # =======================================================================
 
+def print_safe_unicode(content: str) -> None:
+    """Prints a string, fallback to safe CP1252 characters if terminal encoding fails."""
+    try:
+        print(content)
+    except UnicodeEncodeError:
+        safe_content = content.encode('cp1252', errors='replace').decode('cp1252')
+        print(safe_content)
+
+
 def _bot_headers() -> Dict[str, str]:
     return {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
@@ -293,6 +302,8 @@ def _build_coin_log_message(coin: str, result: Dict[str, Any], now_str: str) -> 
     # ── Signal verdict ──────────────────────────────────────────
     if result.get("buy_alert_triggered"):
         verdict = "🟢 **BUY ALERT TRIGGERED** — Signal sent to #buy-sell-alerts"
+    elif result.get("warning_alert_triggered"):
+        verdict = "🟡 **WARNING ALERT TRIGGERED** — Signal sent to #buy-sell-alerts"
     elif result.get("sell_alert_triggered"):
         verdict = "🔴 **SELL ALERT TRIGGERED** — Signal sent to #buy-sell-alerts"
     else:
@@ -362,6 +373,8 @@ def send_hourly_summary(all_results: Dict[str, Any]) -> bool:
         price      = result.get("metrics", {}).get("current_price", 0)
         if result.get("buy_alert_triggered"):
             sig = "🟢 BUY"
+        elif result.get("warning_alert_triggered"):
+            sig = "🟡 WARN"
         elif result.get("sell_alert_triggered"):
             sig = "🔴 SELL"
         else:
@@ -596,10 +609,17 @@ def send_signal_alert(
     metrics: Dict[str, Any],
     webhook_url: str = ALERT_WEBHOOK_URL
 ) -> bool:
-    color_bar = "🟢" if direction == "BUY" else "🔴"
-    title     = f"{color_bar} **COMPOSITE SYSTEM SCANNER: {direction} SIGNAL** {color_bar}"
-
     if direction == "BUY":
+        color_bar = "🟢"
+        title     = f"{color_bar} **COMPOSITE SYSTEM SCANNER: BUY SIGNAL** {color_bar}"
+    elif direction == "WARNING":
+        color_bar = "🟡"
+        title     = f"{color_bar} **COMPOSITE SYSTEM SCANNER: WARNING ALERT** {color_bar}"
+    else:
+        color_bar = "🔴"
+        title     = f"{color_bar} **COMPOSITE SYSTEM SCANNER: SELL SIGNAL** {color_bar}"
+
+    if direction in ("BUY", "WARNING"):
         checklist = [
             f"{'✅' if metrics['btc_above_200ema'] else '❌'} 1. BTC Macro Filter (Price > 200 EMA)",
             f"{'✅' if metrics['buy_ema_aligned']  else '❌'} 2. Daily EMA Alignment ({metrics['ema_alignment_type']})",
@@ -893,6 +913,18 @@ def evaluate_trading_system(
     metrics["resistance_dist_pct"] = float(resistance_dist_pct)
     metrics["resistance_room_pass"]= bool(resistance_dist_pct >= 3.0)
 
+    # Core indicators raw values for terminal/diagnostics visibility
+    metrics["btc_price"]   = float(latest_btc_price)
+    metrics["btc_ema_200"] = float(latest_btc_ema)
+    metrics["macd"]        = float(latest_macd)
+    metrics["macd_signal"] = float(latest_signal)
+    metrics["macd_hist"]   = float(latest_hist)
+    metrics["bb_upper"]    = float(latest_4h["bb_upper"])
+    metrics["bb_lower"]    = float(latest_4h["bb_lower"])
+    metrics["stoch_k"]     = float(latest_stoch_k) if not pd.isna(latest_stoch_k) else 0.0
+    metrics["stoch_d"]     = float(latest_stoch_d) if not pd.isna(latest_stoch_d) else 0.0
+    metrics["vwap"]        = float(latest_vwap)
+
     report["buy_score"]  = buy_score
     report["sell_score"] = sell_score
     report["metrics"]    = metrics
@@ -900,11 +932,21 @@ def evaluate_trading_system(
     report["buy_mandatory_passed"] = buy_mandatory_passed
     report["status"] = "success"
 
-    if buy_score >= 7 and buy_mandatory_passed:
-        logger.warning(f"🟢 BUY SIGNAL on {coin_id.upper()}! Score: {buy_score}/10. Sending alert...")
-        alert_sent = send_signal_alert(coin_id=coin_id, direction="BUY", score=buy_score, metrics=metrics)
-        report["buy_alert_triggered"]   = True
-        report["buy_notification_sent"] = alert_sent
+    report["buy_alert_triggered"] = False
+    report["warning_alert_triggered"] = False
+    report["sell_alert_triggered"] = False
+
+    if buy_score >= 7:
+        if buy_mandatory_passed:
+            logger.warning(f"🟢 BUY SIGNAL on {coin_id.upper()}! Score: {buy_score}/10. Sending alert...")
+            alert_sent = send_signal_alert(coin_id=coin_id, direction="BUY", score=buy_score, metrics=metrics)
+            report["buy_alert_triggered"]   = True
+            report["buy_notification_sent"] = alert_sent
+        else:
+            logger.warning(f"🟡 WARNING ALERT on {coin_id.upper()}! Score: {buy_score}/10. Sending alert...")
+            alert_sent = send_signal_alert(coin_id=coin_id, direction="WARNING", score=buy_score, metrics=metrics)
+            report["warning_alert_triggered"] = True
+            report["buy_notification_sent"] = alert_sent
 
     elif sell_score >= 7:
         logger.warning(f"🔴 SELL SIGNAL on {coin_id.upper()}! Score: {sell_score}/10. Sending alert...")
@@ -950,11 +992,13 @@ if __name__ == "__main__":
         for coin in WATCHLIST:
             result = evaluate_trading_system(coin_id=coin, use_mock_data=args.mock, force_sell=args.force_sell)
             all_results[coin] = result
-            print(f"\n--- {coin.upper()} ---")
-            print(f"  Buy Score  : {result.get('buy_score', 'N/A')}/10")
-            print(f"  Sell Score : {result.get('sell_score', 'N/A')}/10")
-            print(f"  Buy Alert  : {result.get('buy_alert_triggered', False)}")
-            print(f"  Sell Alert : {result.get('sell_alert_triggered', False)}")
+            now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+            msg = _build_coin_log_message(coin, result, now_str)
+            # Remove the markdown code block backticks for clean terminal output
+            console_msg = msg.replace("```\n", "").replace("```", "")
+            print("")
+            print_safe_unicode(console_msg)
+
             if coin != WATCHLIST[-1]:
                 logger.info("Pacing API... sleeping 10s...")
                 time.sleep(10)
@@ -972,5 +1016,11 @@ if __name__ == "__main__":
             stop_override=args.stop, resistance_override=args.resistance,
             use_mock_data=args.mock, force_sell=args.force_sell
         )
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        msg = _build_coin_log_message(args.coin, result, now_str)
+        console_msg = msg.replace("```\n", "").replace("```", "")
+        print("")
+        print_safe_unicode(console_msg)
+            
         print("\n--- Pipeline Execution Report ---")
         print(json.dumps(result, indent=4))
