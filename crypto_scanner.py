@@ -18,14 +18,13 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------
 # Constants & Configuration
 # -----------------------------------------------------------------------
+# Free public CoinGecko API — no API key required.
+# Do NOT change to demo-api.coingecko.com (that is a paid/demo endpoint).
 COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
 FEAR_GREED_API_URL = "https://api.alternative.me/fng/"
 DEFAULT_COIN       = "solana"
 DEFAULT_VS_CURRENCY = "usd"
 RSI_PERIOD         = 14
-
-# Option to use a free CoinGecko Developer/Demo API key to increase rate limits to 30 requests/min
-COINGECKO_API_KEY   = os.environ.get("COINGECKO_API_KEY", "")
 
 # -----------------------------------------------------------------------
 # Discord configuration
@@ -46,11 +45,10 @@ COINGECKO_API_KEY   = os.environ.get("COINGECKO_API_KEY", "")
 #                        channels will be created (e.g. "CRYPTO SCANNER")
 #                        Right-click the category → Copy ID
 # -----------------------------------------------------------------------
-# Strip any accidental white spaces or quotes from environment variables
-ALERT_WEBHOOK_URL  = os.environ.get("ALERT_WEBHOOK_URL",  "https://discord.com/api/webhooks/placeholder-id/placeholder-token").strip().strip('"').strip("'")
-DISCORD_BOT_TOKEN  = os.environ.get("DISCORD_BOT_TOKEN",  "placeholder-bot-token").strip().strip('"').strip("'")
-DISCORD_GUILD_ID   = os.environ.get("DISCORD_GUILD_ID",   "placeholder-guild-id").strip().strip('"').strip("'")
-LOG_CATEGORY_ID    = os.environ.get("LOG_CATEGORY_ID",    "placeholder-category-id").strip().strip('"').strip("'")
+ALERT_WEBHOOK_URL  = os.environ.get("ALERT_WEBHOOK_URL",  "https://discord.com/api/webhooks/placeholder-id/placeholder-token")
+DISCORD_BOT_TOKEN  = os.environ.get("DISCORD_BOT_TOKEN",  "placeholder-bot-token")
+DISCORD_GUILD_ID   = os.environ.get("DISCORD_GUILD_ID",   "placeholder-guild-id")
+LOG_CATEGORY_ID    = os.environ.get("LOG_CATEGORY_ID",    "placeholder-category-id")
 
 DISCORD_API_BASE   = "https://discord.com/api/v10"
 
@@ -85,15 +83,6 @@ MOCK_RESISTANCE_LEVELS = {
 # =======================================================================
 # DISCORD BOT HELPERS
 # =======================================================================
-
-def print_safe_unicode(content: str) -> None:
-    """Prints a string, fallback to safe CP1252 characters if terminal encoding fails."""
-    try:
-        print(content)
-    except UnicodeEncodeError:
-        safe_content = content.encode('cp1252', errors='replace').decode('cp1252')
-        print(safe_content)
-
 
 def _bot_headers() -> Dict[str, str]:
     return {
@@ -150,12 +139,10 @@ def get_or_create_monthly_log_channel() -> Optional[str]:
     payload = {
         "name": channel_name,
         "type": 0,                        # 0 = text channel
+        "parent_id": LOG_CATEGORY_ID,
         "topic": f"Hourly crypto scanner logs for {datetime.utcnow().strftime('%B %Y')}",
         "position": 0
     }
-    # Only assign parent_id if LOG_CATEGORY_ID is a valid numeric Snowflake
-    if LOG_CATEGORY_ID and LOG_CATEGORY_ID.isdigit():
-        payload["parent_id"] = LOG_CATEGORY_ID
     try:
         resp = requests.post(
             f"{DISCORD_API_BASE}/guilds/{DISCORD_GUILD_ID}/channels",
@@ -163,7 +150,16 @@ def get_or_create_monthly_log_channel() -> Optional[str]:
             json=payload,
             timeout=10
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            # Log the full Discord error body so you can diagnose 400s easily
+            logger.error(
+                f"[Discord] Failed to create channel #{channel_name}. "
+                f"Status: {resp.status_code}. Body: {resp.text}\n"
+                f"Check: (1) LOG_CATEGORY_ID is correct, "
+                f"(2) Bot has 'Manage Channels' permission in the category, "
+                f"(3) DISCORD_GUILD_ID matches the server where the bot was invited."
+            )
+            return None
         new_channel = resp.json()
         logger.info(f"[Discord] Created #{channel_name} (id={new_channel['id']})")
         return new_channel["id"]
@@ -307,11 +303,11 @@ def _build_coin_log_message(coin: str, result: Dict[str, Any], now_str: str) -> 
 
     # ── Signal verdict ──────────────────────────────────────────
     if result.get("buy_alert_triggered"):
-        verdict = "🟢 **BUY ALERT TRIGGERED** — Signal sent to #buy-sell-alerts"
+        verdict = "🟢 BUY ALERT TRIGGERED — Signal sent to #buy-sell-alerts"
     elif result.get("warning_alert_triggered"):
-        verdict = "🟡 **WARNING ALERT TRIGGERED** — Signal sent to #buy-sell-alerts"
+        verdict = "🟡 WARNING ALERT TRIGGERED — Strong setup but mandatory filter(s) failed. Sent to #buy-sell-alerts"
     elif result.get("sell_alert_triggered"):
-        verdict = "🔴 **SELL ALERT TRIGGERED** — Signal sent to #buy-sell-alerts"
+        verdict = "🔴 SELL ALERT TRIGGERED — Signal sent to #buy-sell-alerts"
     else:
         if buy_score >= sell_score:
             verdict = f"⬜ NO BUY SIGNAL  (score {buy_score}/10, need 7 + mandatory pass)"
@@ -466,16 +462,12 @@ def fetch_coingecko_market_chart(
     vs_currency: str = DEFAULT_VS_CURRENCY,
     interval: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
-    # Both free and Demo plans use standard api.coingecko.com gateway for v3
-    base_url = COINGECKO_BASE_URL
-    endpoint = f"{base_url}/coins/{coin_id}/market_chart"
+    endpoint    = f"{COINGECKO_BASE_URL}/coins/{coin_id}/market_chart"
     params      = {"vs_currency": vs_currency, "days": str(days)}
     if interval:
         params["interval"] = interval
 
     headers     = {"accept": "application/json", "User-Agent": "UnifiedCryptoPipeline/3.1"}
-    if COINGECKO_API_KEY:
-        headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
     max_retries = 3
     retry_delay = 6.0
 
@@ -619,15 +611,16 @@ def send_signal_alert(
     metrics: Dict[str, Any],
     webhook_url: str = ALERT_WEBHOOK_URL
 ) -> bool:
+    # direction is "BUY", "WARNING", or "SELL"
     if direction == "BUY":
         color_bar = "🟢"
-        title     = f"{color_bar} **COMPOSITE SYSTEM SCANNER: BUY SIGNAL** {color_bar}"
+        title     = f"🟢 **COMPOSITE SYSTEM SCANNER: BUY SIGNAL** 🟢"
     elif direction == "WARNING":
         color_bar = "🟡"
-        title     = f"{color_bar} **COMPOSITE SYSTEM SCANNER: WARNING ALERT** {color_bar}"
+        title     = f"🟡 **COMPOSITE SYSTEM SCANNER: NEAR-SIGNAL WARNING** 🟡"
     else:
         color_bar = "🔴"
-        title     = f"{color_bar} **COMPOSITE SYSTEM SCANNER: SELL SIGNAL** {color_bar}"
+        title     = f"🔴 **COMPOSITE SYSTEM SCANNER: SELL SIGNAL** 🔴"
 
     if direction in ("BUY", "WARNING"):
         checklist = [
@@ -642,11 +635,25 @@ def send_signal_alert(
             f"{'✅' if metrics['buy_sentiment']    else '❌'} 9. Sentiment (Fear & Greed: {metrics['fear_greed']})",
             f"{'✅' if metrics['buy_adx']          else '❌'} 10. ADX Trend Strength ({metrics['adx']:.1f})",
         ]
+        btc_status = "✅ PASS" if metrics["btc_above_200ema"] else "❌ FAIL"
+        rr_status  = "✅ PASS" if metrics["risk_reward_pass"]  else f"❌ FAIL  ({metrics['risk_reward_ratio']:.2f}x — need 2.0x)"
         mandatory_status = (
             f"⚠️ **Mandatory Filters:**\n"
-            f"  * [Rule #1] BTC Macro Trend: {'✅' if metrics['btc_above_200ema'] else '❌'}\n"
-            f"  * [Rule #8] Risk/Reward (>= 2.0): {'✅' if metrics['risk_reward_pass'] else '❌'}\n\n"
+            f"  * [Rule #1] BTC Macro Trend:      {btc_status}\n"
+            f"  * [Rule #8] Risk/Reward (>= 2.0): {rr_status}\n\n"
         )
+        # Warning-specific note explaining why it didn't become a full BUY
+        if direction == "WARNING":
+            failed = []
+            if not metrics["btc_above_200ema"]: failed.append("BTC Macro Trend [#1]")
+            if not metrics["risk_reward_pass"]:  failed.append(f"Risk/Reward [#8] ({metrics['risk_reward_ratio']:.2f}x)")
+            warning_note = (
+                f"🟡 **Strong setup ({score}/10) but mandatory filter(s) blocked a full BUY signal:**\n"
+                f"  * Failed: {', '.join(failed)}\n"
+                f"  * Do NOT enter without manual review of the above.\n\n"
+            )
+        else:
+            warning_note = ""
     else:
         checklist = [
             f"{'🚨' if metrics['sell_ema']        else '⚪'} 1. EMA Downtrend (Price < 200 EMA)",
@@ -661,6 +668,7 @@ def send_signal_alert(
             f"{'🚨' if metrics['sell_onchain']    else '⚪'} 10. Whale Dumping (Large exchange inflows)",
         ]
         mandatory_status = ""
+        warning_note     = ""
 
     checklist_str = "\n".join(checklist)
     payload = {
@@ -671,6 +679,7 @@ def send_signal_alert(
             f"**Asset:** ${coin_id.upper()}\n"
             f"**Current Price:** ${metrics['current_price']:,.2f} USD\n"
             f"**Composite Score:** **{score}/10**\n\n"
+            f"{warning_note}"
             f"{mandatory_status}"
             f"📋 **System Checklist:**\n"
             f"```\n{checklist_str}\n```\n"
@@ -679,7 +688,7 @@ def send_signal_alert(
             f"  * *Stop Loss:* ${metrics['stop_loss']:,.2f}\n"
             f"  * *Target (Resistance):* ${metrics['target_price']:,.2f}\n"
             f"  * *Risk/Reward:* {metrics['risk_reward_ratio']:.2f}x\n"
-            f"**Status:** Setup validated. Execute manual validation before entry."
+            f"**Status:** {'⚠️ Manual review required before entry.' if direction == 'WARNING' else 'Setup validated. Execute manual validation before entry.'}"
         )
     }
 
@@ -707,8 +716,7 @@ def evaluate_trading_system(
     stop_override: Optional[float] = None,
     resistance_override: Optional[float] = None,
     use_mock_data: bool = False,
-    force_sell: bool = False,
-    btc_daily_cache: Optional[pd.Series] = None
+    force_sell: bool = False
 ) -> Dict[str, Any]:
 
     report = {
@@ -730,23 +738,16 @@ def evaluate_trading_system(
         latest_ema50     = coin_daily.ewm(span=50,  adjust=False).mean().iloc[-1]
         latest_ema200    = coin_daily.ewm(span=200, adjust=False).mean().iloc[-1]
     else:
-        if btc_daily_cache is not None:
-            logger.info("Using cached BTC daily prices...")
-            btc_daily = btc_daily_cache
-        else:
-            logger.info("Fetching daily BTC prices...")
-            btc_daily = get_daily_prices("bitcoin", days=250)
-            
+        logger.info("Fetching daily BTC prices...")
+        btc_daily = get_daily_prices("bitcoin", days=250)
         if btc_daily is None or len(btc_daily) < 200:
             report["error"] = "Insufficient BTC daily data"; return report
 
         latest_btc_price = btc_daily.iloc[-1]
         latest_btc_ema   = btc_daily.ewm(span=200, adjust=False).mean().iloc[-1]
 
-        # Only sleep if we actually fetched a fresh BTC chart to pace requests
-        if btc_daily_cache is None:
-            logger.info("Pacing API... sleeping 8s...")
-            time.sleep(8.0)
+        logger.info("Pacing API... sleeping 8s...")
+        time.sleep(8.0)
 
         logger.info(f"Fetching daily {coin_id.upper()} prices...")
         coin_daily = get_daily_prices(coin_id, days=250)
@@ -931,18 +932,6 @@ def evaluate_trading_system(
     metrics["resistance_dist_pct"] = float(resistance_dist_pct)
     metrics["resistance_room_pass"]= bool(resistance_dist_pct >= 3.0)
 
-    # Core indicators raw values for terminal/diagnostics visibility
-    metrics["btc_price"]   = float(latest_btc_price)
-    metrics["btc_ema_200"] = float(latest_btc_ema)
-    metrics["macd"]        = float(latest_macd)
-    metrics["macd_signal"] = float(latest_signal)
-    metrics["macd_hist"]   = float(latest_hist)
-    metrics["bb_upper"]    = float(latest_4h["bb_upper"])
-    metrics["bb_lower"]    = float(latest_4h["bb_lower"])
-    metrics["stoch_k"]     = float(latest_stoch_k) if not pd.isna(latest_stoch_k) else 0.0
-    metrics["stoch_d"]     = float(latest_stoch_d) if not pd.isna(latest_stoch_d) else 0.0
-    metrics["vwap"]        = float(latest_vwap)
-
     report["buy_score"]  = buy_score
     report["sell_score"] = sell_score
     report["metrics"]    = metrics
@@ -950,30 +939,39 @@ def evaluate_trading_system(
     report["buy_mandatory_passed"] = buy_mandatory_passed
     report["status"] = "success"
 
-    report["buy_alert_triggered"] = False
-    report["warning_alert_triggered"] = False
-    report["sell_alert_triggered"] = False
+    if buy_score >= 7 and buy_mandatory_passed:
+        # ✅ Full BUY — score threshold met AND both mandatory filters pass
+        logger.warning(f"🟢 BUY SIGNAL on {coin_id.upper()}! Score: {buy_score}/10. Sending alert...")
+        alert_sent = send_signal_alert(coin_id=coin_id, direction="BUY", score=buy_score, metrics=metrics)
+        report["buy_alert_triggered"]   = True
+        report["buy_notification_sent"] = alert_sent
 
-    if buy_score >= 7:
-        if buy_mandatory_passed:
-            logger.warning(f"🟢 BUY SIGNAL on {coin_id.upper()}! Score: {buy_score}/10. Sending alert...")
-            alert_sent = send_signal_alert(coin_id=coin_id, direction="BUY", score=buy_score, metrics=metrics)
-            report["buy_alert_triggered"]   = True
-            report["buy_notification_sent"] = alert_sent
-        else:
-            logger.warning(f"🟡 WARNING ALERT on {coin_id.upper()}! Score: {buy_score}/10. Sending alert...")
-            alert_sent = send_signal_alert(coin_id=coin_id, direction="WARNING", score=buy_score, metrics=metrics)
-            report["warning_alert_triggered"] = True
-            report["buy_notification_sent"] = alert_sent
+    elif buy_score >= 7 and not buy_mandatory_passed:
+        # 🟡 WARNING — strong setup but mandatory filter(s) failed
+        # Still notifies you so you don't miss a high-scoring setup
+        failed_filters = []
+        if not btc_above_200ema: failed_filters.append("BTC Macro Trend (#1)")
+        if not risk_reward_pass:  failed_filters.append(f"Risk/Reward (#8) — {risk_reward_ratio:.2f}x")
+        logger.warning(
+            f"🟡 NEAR-SIGNAL WARNING on {coin_id.upper()}! Score: {buy_score}/10 "
+            f"but mandatory failed: {', '.join(failed_filters)}"
+        )
+        alert_sent = send_signal_alert(coin_id=coin_id, direction="WARNING", score=buy_score, metrics=metrics)
+        report["warning_alert_triggered"]   = True
+        report["warning_notification_sent"] = alert_sent
 
     elif sell_score >= 7:
+        # 🔴 SELL — sell score threshold met
         logger.warning(f"🔴 SELL SIGNAL on {coin_id.upper()}! Score: {sell_score}/10. Sending alert...")
         alert_sent = send_signal_alert(coin_id=coin_id, direction="SELL", score=sell_score, metrics=metrics)
         report["sell_alert_triggered"]   = True
         report["sell_notification_sent"] = alert_sent
 
     else:
-        logger.info(f"[{coin_id.upper()}] Buy: {buy_score}/10 (mandatory: {buy_mandatory_passed}) | Sell: {sell_score}/10 — No alert.")
+        logger.info(
+            f"[{coin_id.upper()}] Buy: {buy_score}/10 (mandatory: {buy_mandatory_passed}) "
+            f"| Sell: {sell_score}/10 — No alert."
+        )
 
     return report
 
@@ -1007,30 +1005,14 @@ if __name__ == "__main__":
         logger.info(f"=== WATCHLIST MODE: scanning {WATCHLIST} ===")
         all_results = {}
 
-        # Pre-fetch BTC daily prices once to prevent rate limits and pacing delays
-        btc_daily_cache = None
-        if not args.mock:
-            logger.info("Pre-fetching daily BTC prices for watchlist caching...")
-            btc_daily_cache = get_daily_prices("bitcoin", days=250)
-            if btc_daily_cache is not None:
-                logger.info("Pacing API... sleeping 8s after BTC pre-fetch...")
-                time.sleep(8.0)
-
         for coin in WATCHLIST:
-            result = evaluate_trading_system(
-                coin_id=coin,
-                use_mock_data=args.mock,
-                force_sell=args.force_sell,
-                btc_daily_cache=btc_daily_cache
-            )
+            result = evaluate_trading_system(coin_id=coin, use_mock_data=args.mock, force_sell=args.force_sell)
             all_results[coin] = result
-            now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-            msg = _build_coin_log_message(coin, result, now_str)
-            # Remove the markdown code block backticks for clean terminal output
-            console_msg = msg.replace("```\n", "").replace("```", "")
-            print("")
-            print_safe_unicode(console_msg)
-
+            print(f"\n--- {coin.upper()} ---")
+            print(f"  Buy Score  : {result.get('buy_score', 'N/A')}/10")
+            print(f"  Sell Score : {result.get('sell_score', 'N/A')}/10")
+            print(f"  Buy Alert  : {result.get('buy_alert_triggered', False)}")
+            print(f"  Sell Alert : {result.get('sell_alert_triggered', False)}")
             if coin != WATCHLIST[-1]:
                 logger.info("Pacing API... sleeping 10s...")
                 time.sleep(10)
@@ -1048,11 +1030,5 @@ if __name__ == "__main__":
             stop_override=args.stop, resistance_override=args.resistance,
             use_mock_data=args.mock, force_sell=args.force_sell
         )
-        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-        msg = _build_coin_log_message(args.coin, result, now_str)
-        console_msg = msg.replace("```\n", "").replace("```", "")
-        print("")
-        print_safe_unicode(console_msg)
-            
         print("\n--- Pipeline Execution Report ---")
         print(json.dumps(result, indent=4))
