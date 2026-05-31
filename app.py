@@ -54,6 +54,35 @@ def trigger_scan():
         "message": "Watchlist scan successfully triggered in background."
     }), 202
 
+def run_test_scan(force_buy, force_sell):
+    try:
+        logger.info(f"Triggering mock test scan (Buy={force_buy}, Sell={force_sell}) for SOLANA...")
+        evaluate_trading_system(coin_id="solana", use_mock_data=True, force_buy=force_buy, force_sell=force_sell)
+    except Exception as e:
+        logger.error(f"Error running test scan: {e}")
+
+@app.route("/test-buy", methods=["GET"])
+def test_buy():
+    logger.info("HTTP request received: Triggering test buy scan.")
+    thread = threading.Thread(target=run_test_scan, args=(True, False))
+    thread.daemon = True
+    thread.start()
+    return jsonify({
+        "status": "success",
+        "message": "Forced BUY signal test scan triggered on SOLANA. You should receive a Discord notification shortly."
+    }), 202
+
+@app.route("/test-sell", methods=["GET"])
+def test_sell():
+    logger.info("HTTP request received: Triggering test sell scan.")
+    thread = threading.Thread(target=run_test_scan, args=(False, True))
+    thread.daemon = True
+    thread.start()
+    return jsonify({
+        "status": "success",
+        "message": "Forced SELL signal test scan triggered on SOLANA. You should receive a Discord notification shortly."
+    }), 202
+
 @app.route("/", methods=["GET"])
 def health_check():
     """

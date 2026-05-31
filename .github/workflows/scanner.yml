@@ -1,12 +1,10 @@
 name: Crypto Market Scanner
 
 on:
-  # 1. Scheduled trigger: runs every hour (UTC)
-  # You can customize the cron schedule to your liking
-  schedule:
-    - cron: '0 * * * *'
-
-  # 2. Manual trigger: allows you to run it anytime from the GitHub website
+  # Triggered externally by cron-job.org every hour via GitHub API.
+  # Removed the built-in 'schedule' trigger because GitHub queues scheduled
+  # workflows during peak hours, causing delays of up to 2+ hours.
+  # cron-job.org calls workflow_dispatch directly, which runs immediately.
   workflow_dispatch:
 
 jobs:
