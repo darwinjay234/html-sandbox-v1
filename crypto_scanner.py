@@ -46,10 +46,11 @@ COINGECKO_API_KEY   = os.environ.get("COINGECKO_API_KEY", "")
 #                        channels will be created (e.g. "CRYPTO SCANNER")
 #                        Right-click the category → Copy ID
 # -----------------------------------------------------------------------
-ALERT_WEBHOOK_URL  = os.environ.get("ALERT_WEBHOOK_URL",  "https://discord.com/api/webhooks/placeholder-id/placeholder-token")
-DISCORD_BOT_TOKEN  = os.environ.get("DISCORD_BOT_TOKEN",  "placeholder-bot-token")
-DISCORD_GUILD_ID   = os.environ.get("DISCORD_GUILD_ID",   "placeholder-guild-id")
-LOG_CATEGORY_ID    = os.environ.get("LOG_CATEGORY_ID",    "placeholder-category-id")
+# Strip any accidental white spaces or quotes from environment variables
+ALERT_WEBHOOK_URL  = os.environ.get("ALERT_WEBHOOK_URL",  "https://discord.com/api/webhooks/placeholder-id/placeholder-token").strip().strip('"').strip("'")
+DISCORD_BOT_TOKEN  = os.environ.get("DISCORD_BOT_TOKEN",  "placeholder-bot-token").strip().strip('"').strip("'")
+DISCORD_GUILD_ID   = os.environ.get("DISCORD_GUILD_ID",   "placeholder-guild-id").strip().strip('"').strip("'")
+LOG_CATEGORY_ID    = os.environ.get("LOG_CATEGORY_ID",    "placeholder-category-id").strip().strip('"').strip("'")
 
 DISCORD_API_BASE   = "https://discord.com/api/v10"
 
@@ -149,10 +150,12 @@ def get_or_create_monthly_log_channel() -> Optional[str]:
     payload = {
         "name": channel_name,
         "type": 0,                        # 0 = text channel
-        "parent_id": LOG_CATEGORY_ID,
         "topic": f"Hourly crypto scanner logs for {datetime.utcnow().strftime('%B %Y')}",
         "position": 0
     }
+    # Only assign parent_id if LOG_CATEGORY_ID is a valid numeric Snowflake
+    if LOG_CATEGORY_ID and LOG_CATEGORY_ID.isdigit():
+        payload["parent_id"] = LOG_CATEGORY_ID
     try:
         resp = requests.post(
             f"{DISCORD_API_BASE}/guilds/{DISCORD_GUILD_ID}/channels",
@@ -463,8 +466,8 @@ def fetch_coingecko_market_chart(
     vs_currency: str = DEFAULT_VS_CURRENCY,
     interval: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
-    # Use demo-api if an API key is provided to unlock higher rate limits
-    base_url = "https://demo-api.coingecko.com/api/v3" if COINGECKO_API_KEY else COINGECKO_BASE_URL
+    # Both free and Demo plans use standard api.coingecko.com gateway for v3
+    base_url = COINGECKO_BASE_URL
     endpoint = f"{base_url}/coins/{coin_id}/market_chart"
     params      = {"vs_currency": vs_currency, "days": str(days)}
     if interval:
