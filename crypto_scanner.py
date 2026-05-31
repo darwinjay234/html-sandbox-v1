@@ -24,6 +24,9 @@ DEFAULT_COIN       = "solana"
 DEFAULT_VS_CURRENCY = "usd"
 RSI_PERIOD         = 14
 
+# Option to use a free CoinGecko Developer/Demo API key to increase rate limits to 30 requests/min
+COINGECKO_API_KEY   = os.environ.get("COINGECKO_API_KEY", "")
+
 # -----------------------------------------------------------------------
 # Discord configuration
 #
@@ -460,12 +463,16 @@ def fetch_coingecko_market_chart(
     vs_currency: str = DEFAULT_VS_CURRENCY,
     interval: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
-    endpoint    = f"{COINGECKO_BASE_URL}/coins/{coin_id}/market_chart"
+    # Use demo-api if an API key is provided to unlock higher rate limits
+    base_url = "https://demo-api.coingecko.com/api/v3" if COINGECKO_API_KEY else COINGECKO_BASE_URL
+    endpoint = f"{base_url}/coins/{coin_id}/market_chart"
     params      = {"vs_currency": vs_currency, "days": str(days)}
     if interval:
         params["interval"] = interval
 
     headers     = {"accept": "application/json", "User-Agent": "UnifiedCryptoPipeline/3.1"}
+    if COINGECKO_API_KEY:
+        headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
     max_retries = 3
     retry_delay = 6.0
 
@@ -697,7 +704,8 @@ def evaluate_trading_system(
     stop_override: Optional[float] = None,
     resistance_override: Optional[float] = None,
     use_mock_data: bool = False,
-    force_sell: bool = False
+    force_sell: bool = False,
+    btc_daily_cache: Optional[pd.Series] = None
 ) -> Dict[str, Any]:
 
     report = {
@@ -719,16 +727,23 @@ def evaluate_trading_system(
         latest_ema50     = coin_daily.ewm(span=50,  adjust=False).mean().iloc[-1]
         latest_ema200    = coin_daily.ewm(span=200, adjust=False).mean().iloc[-1]
     else:
-        logger.info("Fetching daily BTC prices...")
-        btc_daily = get_daily_prices("bitcoin", days=250)
+        if btc_daily_cache is not None:
+            logger.info("Using cached BTC daily prices...")
+            btc_daily = btc_daily_cache
+        else:
+            logger.info("Fetching daily BTC prices...")
+            btc_daily = get_daily_prices("bitcoin", days=250)
+            
         if btc_daily is None or len(btc_daily) < 200:
             report["error"] = "Insufficient BTC daily data"; return report
 
         latest_btc_price = btc_daily.iloc[-1]
         latest_btc_ema   = btc_daily.ewm(span=200, adjust=False).mean().iloc[-1]
 
-        logger.info("Pacing API... sleeping 8s...")
-        time.sleep(8.0)
+        # Only sleep if we actually fetched a fresh BTC chart to pace requests
+        if btc_daily_cache is None:
+            logger.info("Pacing API... sleeping 8s...")
+            time.sleep(8.0)
 
         logger.info(f"Fetching daily {coin_id.upper()} prices...")
         coin_daily = get_daily_prices(coin_id, days=250)
@@ -989,8 +1004,22 @@ if __name__ == "__main__":
         logger.info(f"=== WATCHLIST MODE: scanning {WATCHLIST} ===")
         all_results = {}
 
+        # Pre-fetch BTC daily prices once to prevent rate limits and pacing delays
+        btc_daily_cache = None
+        if not args.mock:
+            logger.info("Pre-fetching daily BTC prices for watchlist caching...")
+            btc_daily_cache = get_daily_prices("bitcoin", days=250)
+            if btc_daily_cache is not None:
+                logger.info("Pacing API... sleeping 8s after BTC pre-fetch...")
+                time.sleep(8.0)
+
         for coin in WATCHLIST:
-            result = evaluate_trading_system(coin_id=coin, use_mock_data=args.mock, force_sell=args.force_sell)
+            result = evaluate_trading_system(
+                coin_id=coin,
+                use_mock_data=args.mock,
+                force_sell=args.force_sell,
+                btc_daily_cache=btc_daily_cache
+            )
             all_results[coin] = result
             now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
             msg = _build_coin_log_message(coin, result, now_str)

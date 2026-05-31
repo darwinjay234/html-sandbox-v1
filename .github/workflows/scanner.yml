@@ -36,5 +36,9 @@ jobs:
     - name: Execute Scanner
       env:
         ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+        DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
+        LOG_CATEGORY_ID: ${{ secrets.LOG_CATEGORY_ID }}
+        COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
       run: |
         python crypto_scanner.py --watchlist
