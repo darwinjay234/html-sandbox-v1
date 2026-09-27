@@ -1,5 +1,6 @@
 # Virtual Environment
 venv/
+.venv/
 ENV/
 .env
 
@@ -11,6 +12,9 @@ __pycache__/
 
 # Local Workspace Chat History (strictly kept local)
 chat_history.md
+
+# Locally collected market and scan history
+data/history/
 
 # System configuration folders
 .antigravitycli/
