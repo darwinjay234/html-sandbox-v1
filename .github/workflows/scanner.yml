@@ -7,6 +7,13 @@ on:
   # cron-job.org calls workflow_dispatch directly, which runs immediately.
   workflow_dispatch:
 
+concurrency:
+  group: crypto-market-scanner-history
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
@@ -30,16 +37,6 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    # Each hosted runner starts clean. Restore the latest saved history and
-    # cache the updated CSVs after this scan so hourly runs can accumulate data.
-    - name: Restore market history
-      uses: actions/cache@v4
-      with:
-        path: data/history
-        key: ${{ runner.os }}-crypto-history-${{ github.run_id }}
-        restore-keys: |
-          ${{ runner.os }}-crypto-history-
-
     # Step 4: Run the scanner
     # The webhook URL is securely pulled from GitHub Secrets and injected
     # as an environment variable, completely hiding it from the public.
@@ -52,3 +49,17 @@ jobs:
         COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
       run: |
         python crypto_scanner.py --watchlist
+
+    # Persist the updated CSVs on main so the next hourly run starts with the
+    # complete history instead of relying on an evictable Actions cache.
+    - name: Commit market history
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add -f data/history/market_candles.csv data/history/scan_decisions.csv
+        if git diff --cached --quiet; then
+          echo "No history changes to commit."
+        else
+          git commit -m "Update crypto scan history"
+          git push
+        fi
