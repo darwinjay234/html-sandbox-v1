@@ -30,6 +30,16 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
+    # Each hosted runner starts clean. Restore the latest saved history and
+    # cache the updated CSVs after this scan so hourly runs can accumulate data.
+    - name: Restore market history
+      uses: actions/cache@v4
+      with:
+        path: data/history
+        key: ${{ runner.os }}-crypto-history-${{ github.run_id }}
+        restore-keys: |
+          ${{ runner.os }}-crypto-history-
+
     # Step 4: Run the scanner
     # The webhook URL is securely pulled from GitHub Secrets and injected
     # as an environment variable, completely hiding it from the public.

@@ -92,6 +92,17 @@ When you are ready to evaluate real-time market data, omit the `--mock` flag. Th
 
 *Pacing Delay: The live scanner enforces an 8-second pacing sleep between sequential API requests to safely navigate public rate-limiting tiers.*
 
+## Historical CSV collection
+
+Every successful live scan saves market observations and the resulting decision under `data/history/`:
+
+- `market_candles.csv` stores coin, timeframe, UTC timestamp, price, volume, high, low, and data source. It records closed daily price observations and resampled 4-hour observations. The 4-hour high/low fields are estimates derived from CoinGecko price points, not exchange-reported OHLC candles; daily volume/high/low are blank because this scanner does not fetch them.
+- `scan_decisions.csv` stores scan time, scores, alert states, and the indicator metrics as JSON. Mock scans are marked `mock` so they can be excluded from real-market analysis. The decision metrics also identify the on-chain values as mock configuration; they are not live on-chain data.
+
+Rows are deduplicated by coin, timeframe, and candle timestamp, so the rolling 250-day and 30-day API windows do not get copied into the CSV on every run. Set `CRYPTO_HISTORY_DIR` to choose another local output directory. The generated `data/history/` files are git-ignored.
+
+The GitHub Actions workflow restores and updates the history through its cache so its normally temporary runner can carry the CSVs forward between scans. Caches are a convenient starter store, not a permanent archive; download the CSVs periodically if you need a durable backup. Locally run `python crypto_scanner.py --watchlist` to collect live history, or `python crypto_scanner.py --coin bitcoin` for one coin. Mock runs only add decision rows and never add synthetic candles to market history.
+
 ### 1. Scan a Single Live Asset
 Scan **Solana** on real-time market data:
 ```powershell

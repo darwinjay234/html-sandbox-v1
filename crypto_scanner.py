@@ -5,7 +5,7 @@ import requests
 import time
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple, List
 
 # Setup logger
@@ -25,6 +25,9 @@ FEAR_GREED_API_URL = "https://api.alternative.me/fng/"
 DEFAULT_COIN       = "solana"
 DEFAULT_VS_CURRENCY = "usd"
 RSI_PERIOD         = 14
+HISTORY_DIR        = os.environ.get("CRYPTO_HISTORY_DIR", "data/history")
+CANDLE_HISTORY_FILE = os.path.join(HISTORY_DIR, "market_candles.csv")
+SCAN_HISTORY_FILE   = os.path.join(HISTORY_DIR, "scan_decisions.csv")
 
 # -----------------------------------------------------------------------
 # Discord configuration
@@ -78,6 +81,72 @@ MOCK_RESISTANCE_LEVELS = {
     "dogecoin":    0.22,
     "binancecoin": 720.0,
 }
+
+
+def _append_csv_rows(path: str, rows: List[Dict[str, Any]], key_columns: Tuple[str, ...]) -> int:
+    """Append rows to a CSV once per key, preserving history across scans."""
+    if not rows:
+        return 0
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    frame = pd.DataFrame(rows)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        try:
+            existing = pd.read_csv(path, usecols=list(key_columns), dtype=str)
+        except (ValueError, pd.errors.EmptyDataError):
+            existing = pd.DataFrame(columns=list(key_columns))
+        existing_keys = set(map(tuple, existing.fillna("").astype(str).itertuples(index=False, name=None)))
+        row_keys = frame[list(key_columns)].fillna("").astype(str).apply(tuple, axis=1)
+        frame = frame.loc[~row_keys.isin(existing_keys)]
+    if frame.empty:
+        return 0
+    frame.to_csv(path, mode="a", header=not os.path.exists(path) or os.path.getsize(path) == 0, index=False)
+    return len(frame)
+
+
+def save_market_history(coin_id: str, daily_prices: pd.Series, df_4h: pd.DataFrame,
+                        data_source: str) -> int:
+    """Persist daily and 4-hour observations; deduplicate on coin/timeframe/time."""
+    rows: List[Dict[str, Any]] = []
+    now_utc = pd.Timestamp.now(tz="UTC")
+    daily_cutoff = now_utc.normalize().tz_localize(None)
+    four_hour_cutoff = now_utc.floor("4h").tz_localize(None)
+    # Keep only closed intervals so later scans cannot encounter a stale,
+    # previously logged value for a candle that was still forming.
+    for timestamp, price in daily_prices.items():
+        timestamp = pd.Timestamp(timestamp)
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+        if timestamp >= daily_cutoff:
+            continue
+        rows.append({"coin_id": coin_id, "timeframe": "1d",
+                     "timestamp_utc": timestamp.tz_localize("UTC").isoformat(),
+                     "price": float(price), "volume": "", "high": "", "low": "",
+                     "data_source": data_source})
+    for timestamp, candle in df_4h.iterrows():
+        timestamp = pd.Timestamp(timestamp)
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+        if timestamp >= four_hour_cutoff:
+            continue
+        rows.append({"coin_id": coin_id, "timeframe": "4h",
+                     "timestamp_utc": timestamp.tz_localize("UTC").isoformat(),
+                     "price": float(candle["price"]), "volume": float(candle["volume"]),
+                     "high": float(candle["high"]), "low": float(candle["low"]),
+                     "data_source": data_source})
+    return _append_csv_rows(CANDLE_HISTORY_FILE, rows, ("coin_id", "timeframe", "timestamp_utc"))
+
+
+def save_scan_decision(coin_id: str, report: Dict[str, Any], data_source: str) -> int:
+    metrics = report.get("metrics", {})
+    row = {"scanned_at_utc": datetime.now(timezone.utc).isoformat(), "coin_id": coin_id,
+           "data_source": data_source, "status": report.get("status"),
+           "buy_score": report.get("buy_score", 0), "sell_score": report.get("sell_score", 0),
+           "buy_mandatory_passed": report.get("buy_mandatory_passed", False),
+           "buy_alert_triggered": report.get("buy_alert_triggered", False),
+           "warning_alert_triggered": report.get("warning_alert_triggered", False),
+           "sell_alert_triggered": report.get("sell_alert_triggered", False),
+           "metrics_json": json.dumps(metrics, sort_keys=True, default=str)}
+    return _append_csv_rows(SCAN_HISTORY_FILE, [row], ("scanned_at_utc", "coin_id"))
 
 
 # =======================================================================
@@ -779,6 +848,13 @@ def evaluate_trading_system(
         if df_4h is None or len(df_4h) < 30:
             report["error"] = f"Insufficient 4H data for {coin_id}"; return report
 
+    data_source = "mock" if use_mock_data else "coingecko"
+    # Synthetic candles are useful for notification checks, but should not be
+    # mixed into the real market history used to review strategy performance.
+    if not use_mock_data:
+        saved = save_market_history(coin_id, coin_daily, df_4h, data_source)
+        logger.info(f"Saved {saved} new market candles for {coin_id.upper()} to {CANDLE_HISTORY_FILE}.")
+
     # Calculate indicators
     df_4h["rsi"]       = calculate_rsi(df_4h["price"], period=RSI_PERIOD)
     macd_l, sig_l, hist_l = calculate_macd(df_4h["price"])
@@ -834,6 +910,7 @@ def evaluate_trading_system(
         "current_price": float(latest_price), "fear_greed": int(fear_greed),
         "rsi_4h": float(latest_rsi_4h),       "adx": float(latest_adx),
         "whale_accumulating": whale_accumulating, "large_inflows_detected": large_inflows_detected,
+        "onchain_data_source": "mock_configuration",
     }
 
     # 1. BTC Macro
@@ -985,6 +1062,9 @@ def evaluate_trading_system(
             f"| Sell: {sell_score}/10 — No alert."
         )
 
+    saved = save_scan_decision(coin_id, report, data_source)
+    if saved:
+        logger.info(f"Saved scan decision for {coin_id.upper()} to {SCAN_HISTORY_FILE}.")
     return report
 
 
