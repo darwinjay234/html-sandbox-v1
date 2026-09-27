@@ -149,6 +149,21 @@ def save_scan_decision(coin_id: str, report: Dict[str, Any], data_source: str) -
     return _append_csv_rows(SCAN_HISTORY_FILE, [row], ("scanned_at_utc", "coin_id"))
 
 
+def get_previous_scan_metrics(coin_id: str) -> Dict[str, Any]:
+    """Load the previous scan's metrics to suppress repeated setup alerts."""
+    if not os.path.exists(SCAN_HISTORY_FILE) or os.path.getsize(SCAN_HISTORY_FILE) == 0:
+        return {}
+    try:
+        history = pd.read_csv(SCAN_HISTORY_FILE, usecols=["coin_id", "metrics_json"], dtype=str)
+        matches = history.loc[history["coin_id"] == coin_id]
+        if matches.empty:
+            return {}
+        return json.loads(matches.iloc[-1]["metrics_json"])
+    except (OSError, ValueError, pd.errors.EmptyDataError, json.JSONDecodeError) as error:
+        logger.warning(f"Could not read previous setup state for {coin_id}: {error}")
+        return {}
+
+
 # =======================================================================
 # DISCORD BOT HELPERS
 # =======================================================================
@@ -377,6 +392,14 @@ def _build_coin_log_message(coin: str, result: Dict[str, Any], now_str: str) -> 
         verdict = "🟡 WARNING ALERT TRIGGERED — Strong setup but mandatory filter(s) failed. Sent to #buy-sell-alerts"
     elif result.get("sell_alert_triggered"):
         verdict = "🔴 SELL ALERT TRIGGERED — Signal sent to #buy-sell-alerts"
+    elif result.get("early_buy_alert_triggered"):
+        verdict = "⚡ EARLY BUY SETUP ALERT — Provisional 4-6/10 momentum entry tier"
+    elif result.get("early_sell_alert_triggered"):
+        verdict = "🟠 EARLY SELL RISK ALERT — Review exposure; not an automatic sell"
+    elif result.get("early_buy_setup_active"):
+        verdict = "⚡ EARLY BUY SETUP remains active; alert was already sent"
+    elif result.get("early_sell_setup_active"):
+        verdict = "🟠 EARLY SELL RISK remains active; alert was already sent"
     else:
         if buy_score >= sell_score:
             verdict = f"⬜ NO BUY SIGNAL  (score {buy_score}/10, need 7 + mandatory pass)"
@@ -448,6 +471,10 @@ def send_hourly_summary(all_results: Dict[str, Any]) -> bool:
             sig = "🟡 WARN"
         elif result.get("sell_alert_triggered"):
             sig = "🔴 SELL"
+        elif result.get("early_buy_alert_triggered") or result.get("early_buy_setup_active"):
+            sig = "⚡ EARLY BUY"
+        elif result.get("early_sell_alert_triggered") or result.get("early_sell_setup_active"):
+            sig = "🟠 EARLY SELL RISK"
         else:
             sig = "⬜ --"
         summary_lines.append(
@@ -680,18 +707,25 @@ def send_signal_alert(
     metrics: Dict[str, Any],
     webhook_url: str = ALERT_WEBHOOK_URL
 ) -> bool:
-    # direction is "BUY", "WARNING", or "SELL"
+    # EARLY_* messages are provisional setup/risk alerts, distinct from the
+    # confirmed BUY/SELL thresholds.
     if direction == "BUY":
         color_bar = "🟢"
         title     = f"🟢 **COMPOSITE SYSTEM SCANNER: BUY SIGNAL** 🟢"
     elif direction == "WARNING":
         color_bar = "🟡"
         title     = f"🟡 **COMPOSITE SYSTEM SCANNER: NEAR-SIGNAL WARNING** 🟡"
+    elif direction == "EARLY_BUY":
+        color_bar = "⚡"
+        title     = "⚡ **COMPOSITE SYSTEM SCANNER: EARLY BUY SETUP** ⚡"
+    elif direction == "EARLY_SELL":
+        color_bar = "🟠"
+        title     = "🟠 **COMPOSITE SYSTEM SCANNER: EARLY SELL RISK** 🟠"
     else:
         color_bar = "🔴"
         title     = f"🔴 **COMPOSITE SYSTEM SCANNER: SELL SIGNAL** 🔴"
 
-    if direction in ("BUY", "WARNING"):
+    if direction in ("BUY", "WARNING", "EARLY_BUY"):
         checklist = [
             f"{'✅' if metrics['btc_above_200ema'] else '❌'} 1. BTC Macro Filter (Price > 200 EMA)",
             f"{'✅' if metrics['buy_ema_aligned']  else '❌'} 2. Daily EMA Alignment ({metrics['ema_alignment_type']})",
@@ -721,6 +755,15 @@ def send_signal_alert(
                 f"  * Failed: {', '.join(failed)}\n"
                 f"  * Do NOT enter without manual review of the above.\n\n"
             )
+        elif direction == "EARLY_BUY":
+            warning_note = (
+                f"⚡ **Momentum setup is developing ({score}/10).** This early tier needs two momentum checks "
+                f"and at least 1.0:1 estimated reward/risk; the standard BUY still requires 7/10, BTC macro, "
+                f"and 2.0:1.\n"
+                f"  * BTC macro: {'PASS' if metrics['btc_above_200ema'] else 'FAIL'}; "
+                f"daily EMA alignment: {'PASS' if metrics['buy_ema_aligned'] else 'FAIL'}.\n"
+                f"  * Review the stop and target before deciding; this is not an automatic order.\n\n"
+            )
         else:
             warning_note = ""
     else:
@@ -738,6 +781,11 @@ def send_signal_alert(
         ]
         mandatory_status = ""
         warning_note     = ""
+        if direction == "EARLY_SELL":
+            warning_note = (
+                f"🟠 **Downside pressure is building ({score}/10).** This is an early risk alert, not an automatic sell.\n"
+                f"  * Review exposure and the checklist; this scanner does not know whether you hold this coin.\n\n"
+            )
 
     checklist_str = "\n".join(checklist)
     payload = {
@@ -757,7 +805,12 @@ def send_signal_alert(
             f"  * *Stop Loss:* ${metrics['stop_loss']:,.2f}\n"
             f"  * *Target (Resistance):* ${metrics['target_price']:,.2f}\n"
             f"  * *Risk/Reward:* {metrics['risk_reward_ratio']:.2f}x\n"
-            f"**Status:** {'⚠️ Manual review required before entry.' if direction == 'WARNING' else 'Setup validated. Execute manual validation before entry.'}"
+            f"**Status:** "
+            f"{'⚡ Early setup; consider only a planned, risk-limited starter after reviewing the stop.' if direction == 'EARLY_BUY' else ''}"
+            f"{'🟠 Early downside risk; review or trim only if you hold this asset.' if direction == 'EARLY_SELL' else ''}"
+            f"{'⚠️ Manual review required before entry.' if direction == 'WARNING' else ''}"
+            f"{'Setup validated; review manually before acting.' if direction == 'BUY' else ''}"
+            f"{'Sell conditions confirmed; review your holdings and plan.' if direction == 'SELL' else ''}"
         )
     }
 
@@ -798,6 +851,8 @@ def evaluate_trading_system(
         "status": "failed", "coin_id": coin_id,
         "buy_score": 0, "sell_score": 0,
         "buy_alert_triggered": False, "sell_alert_triggered": False,
+        "early_buy_setup_active": False, "early_sell_setup_active": False,
+        "early_buy_alert_triggered": False, "early_sell_alert_triggered": False,
         "metrics": {}
     }
 
@@ -1021,6 +1076,50 @@ def evaluate_trading_system(
     metrics["resistance_dist_pct"] = float(resistance_dist_pct)
     metrics["resistance_room_pass"]= bool(resistance_dist_pct >= 3.0)
 
+    buy_momentum_count = sum((buy_macd, buy_volume_obv, buy_vwap, buy_adx))
+    sell_momentum_count = sum((sell_macd, sell_vwap, obv_divergence, sell_ema, sell_stoch_rsi))
+    # Early alerts are separate from the full BUY/SELL rules. They require a
+    # lower score and two directional checks; early BUY relaxes the hard 2:1
+    # and BTC macro gates but still requires at least 1:1 estimated reward/risk.
+    early_buy_setup_active = bool(
+        4 <= buy_score < 7 and buy_momentum_count >= 2 and risk_reward_ratio >= 1.0
+    )
+    early_sell_setup_active = bool(
+        4 <= sell_score < 7 and sell_momentum_count >= 2
+    )
+    early_setup_conflict = bool(early_buy_setup_active and early_sell_setup_active)
+    if early_setup_conflict:
+        if buy_score >= sell_score + 2:
+            early_sell_setup_active = False
+        elif sell_score >= buy_score + 2:
+            early_buy_setup_active = False
+        else:
+            early_buy_setup_active = False
+            early_sell_setup_active = False
+
+    previous_metrics = get_previous_scan_metrics(coin_id)
+    early_buy_setup_notified = bool(
+        early_buy_setup_active
+        and previous_metrics.get("early_buy_setup_active", False)
+        and previous_metrics.get("early_buy_setup_notified", False)
+    )
+    early_sell_setup_notified = bool(
+        early_sell_setup_active
+        and previous_metrics.get("early_sell_setup_active", False)
+        and previous_metrics.get("early_sell_setup_notified", False)
+    )
+    metrics.update({
+        "early_buy_momentum_count": int(buy_momentum_count),
+        "early_sell_momentum_count": int(sell_momentum_count),
+        "early_buy_setup_active": early_buy_setup_active,
+        "early_sell_setup_active": early_sell_setup_active,
+        "early_setup_conflict": early_setup_conflict,
+        "early_buy_setup_notified": early_buy_setup_notified,
+        "early_sell_setup_notified": early_sell_setup_notified,
+    })
+    report["early_buy_setup_active"] = early_buy_setup_active
+    report["early_sell_setup_active"] = early_sell_setup_active
+
     report["buy_score"]  = buy_score
     report["sell_score"] = sell_score
     report["metrics"]    = metrics
@@ -1055,6 +1154,44 @@ def evaluate_trading_system(
         alert_sent = send_signal_alert(coin_id=coin_id, direction="SELL", score=sell_score, metrics=metrics)
         report["sell_alert_triggered"]   = True
         report["sell_notification_sent"] = alert_sent
+
+    elif early_buy_setup_active:
+        if not early_buy_setup_notified:
+            logger.warning(
+                f"⚡ EARLY BUY SETUP on {coin_id.upper()}! Score: {buy_score}/10; "
+                f"momentum checks: {buy_momentum_count}; estimated R/R: {risk_reward_ratio:.2f}x. Sending alert..."
+            )
+            alert_sent = send_signal_alert(
+                coin_id=coin_id, direction="EARLY_BUY", score=buy_score, metrics=metrics
+            )
+            report["early_buy_alert_triggered"] = True
+            report["early_buy_notification_sent"] = alert_sent
+            early_buy_setup_notified = True
+            metrics["early_buy_setup_notified"] = True
+            metrics["early_buy_alert_triggered"] = True
+        else:
+            logger.info(
+                f"[{coin_id.upper()}] Early BUY setup remains active; alert already sent for this setup."
+            )
+
+    elif early_sell_setup_active:
+        if not early_sell_setup_notified:
+            logger.warning(
+                f"🟠 EARLY SELL RISK on {coin_id.upper()}! Score: {sell_score}/10; "
+                f"downside checks: {sell_momentum_count}. Sending alert..."
+            )
+            alert_sent = send_signal_alert(
+                coin_id=coin_id, direction="EARLY_SELL", score=sell_score, metrics=metrics
+            )
+            report["early_sell_alert_triggered"] = True
+            report["early_sell_notification_sent"] = alert_sent
+            early_sell_setup_notified = True
+            metrics["early_sell_setup_notified"] = True
+            metrics["early_sell_alert_triggered"] = True
+        else:
+            logger.info(
+                f"[{coin_id.upper()}] Early SELL risk remains active; alert already sent for this setup."
+            )
 
     else:
         logger.info(
@@ -1141,6 +1278,8 @@ if __name__ == "__main__":
             print(f"  Buy Alert    : {result.get('buy_alert_triggered', False)}")
             print(f"  Warn Alert   : {result.get('warning_alert_triggered', False)}")
             print(f"  Sell Alert   : {result.get('sell_alert_triggered', False)}")
+            print(f"  Early Buy    : {result.get('early_buy_setup_active', False)}")
+            print(f"  Early Sell   : {result.get('early_sell_setup_active', False)}")
             if coin != WATCHLIST[-1]:
                 logger.info("Pacing API... sleeping 20s before next coin...")
                 time.sleep(20)

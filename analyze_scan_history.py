@@ -57,25 +57,6 @@ def load_closed_4h_prices(path: Path) -> Dict[str, List[Tuple[datetime, float]]]
     return {coin: sorted(rows.items()) for coin, rows in closes.items()}
 
 
-def is_early_momentum(metrics: Dict[str, Any], buy_score: int, alert_state: str) -> bool:
-    """Exploratory cohort for sub-threshold bullish momentum setups.
-
-    Requires a 4-6 buy score, positive BTC macro and EMA alignment, plus either
-    the scanner's MACD or volume/OBV condition. This classification does not
-    alter or trigger any scanner alerts.
-    """
-    return (
-        alert_state == "NONE"
-        and 4 <= buy_score < 7
-        and parse_bool(metrics.get("btc_above_200ema"))
-        and parse_bool(metrics.get("buy_ema_aligned"))
-        and (
-            parse_bool(metrics.get("buy_macd"))
-            or parse_bool(metrics.get("buy_volume_obv"))
-        )
-    )
-
-
 def load_scan_decisions(path: Path) -> List[Dict[str, Any]]:
     if not path.is_file():
         raise FileNotFoundError(f"Scan decision CSV not found: {path}")
@@ -95,12 +76,20 @@ def load_scan_decisions(path: Path) -> List[Dict[str, Any]]:
                 buy_alert = parse_bool(row.get("buy_alert_triggered"))
                 warning_alert = parse_bool(row.get("warning_alert_triggered"))
                 sell_alert = parse_bool(row.get("sell_alert_triggered"))
+                early_buy = parse_bool(metrics.get("early_buy_setup_active"))
+                early_sell = parse_bool(metrics.get("early_sell_setup_active"))
+                early_buy_alert = parse_bool(metrics.get("early_buy_alert_triggered"))
+                early_sell_alert = parse_bool(metrics.get("early_sell_alert_triggered"))
                 if buy_alert:
                     alert_state = "BUY"
                 elif warning_alert:
                     alert_state = "WARNING"
                 elif sell_alert:
                     alert_state = "SELL"
+                elif early_buy_alert:
+                    alert_state = "EARLY_BUY"
+                elif early_sell_alert:
+                    alert_state = "EARLY_SELL_RISK"
                 else:
                     alert_state = "NONE"
                 scanned_at = parse_timestamp(row["scanned_at_utc"])
@@ -111,7 +100,8 @@ def load_scan_decisions(path: Path) -> List[Dict[str, Any]]:
                     "buy_score": buy_score,
                     "sell_score": sell_score,
                     "alert_state": alert_state,
-                    "early_momentum": is_early_momentum(metrics, buy_score, alert_state),
+                    "early_buy_setup": early_buy,
+                    "early_sell_setup": early_sell,
                     "onchain_data_source": metrics.get("onchain_data_source", "unknown"),
                 })
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
@@ -168,7 +158,8 @@ def make_forward_rows(
                 "buy_score": decision["buy_score"],
                 "sell_score": decision["sell_score"],
                 "alert_state": decision["alert_state"],
-                "early_momentum_setup": decision["early_momentum"],
+                "early_buy_setup": decision["early_buy_setup"],
+                "early_sell_setup": decision["early_sell_setup"],
                 "entry_price": decision["entry_price"],
                 "onchain_data_source": decision["onchain_data_source"],
                 **outcome,
@@ -179,15 +170,17 @@ def make_forward_rows(
 def group_memberships(row: Dict[str, Any]) -> List[Tuple[str, str, Optional[str]]]:
     """Return (dimension, value, bias) used for summary aggregation."""
     state = row["alert_state"]
-    state_bias = "short" if state == "SELL" else "long" if state in {"BUY", "WARNING"} else None
+    state_bias = "short" if state in {"SELL", "EARLY_SELL_RISK"} else "long" if state in {"BUY", "WARNING", "EARLY_BUY"} else None
     memberships = [
         ("coin", row["coin_id"], None),
         ("buy_score", str(row["buy_score"]), "long"),
         ("sell_score", str(row["sell_score"]), "short"),
         ("alert_state", state, state_bias),
     ]
-    if row["early_momentum_setup"]:
-        memberships.append(("early_momentum_setup", "true", "long"))
+    if row["early_buy_setup"]:
+        memberships.append(("early_setup", "BUY", "long"))
+    if row["early_sell_setup"]:
+        memberships.append(("early_setup", "SELL_RISK", "short"))
     return memberships
 
 
@@ -255,7 +248,7 @@ def main() -> int:
     summary_rows = make_summary_rows(forward_rows)
     write_csv(args.output_dir / "forward_returns.csv", forward_rows, [
         "scanned_at_utc", "coin_id", "horizon_hours", "buy_score", "sell_score",
-        "alert_state", "early_momentum_setup", "entry_price", "future_close_utc",
+        "alert_state", "early_buy_setup", "early_sell_setup", "entry_price", "future_close_utc",
         "future_price", "observed_after_hours", "price_return_pct", "outcome_status",
         "onchain_data_source",
     ])
@@ -272,7 +265,7 @@ def main() -> int:
     print(f"Detailed outcomes: {args.output_dir / 'forward_returns.csv'}")
     print(f"Grouped summary:    {args.output_dir / 'analysis_summary.csv'}")
     print("Returns are price changes, not simulated trade profits; fees, slippage, and position sizing are excluded.")
-    print("Early momentum is an exploratory cohort only; it does not trigger scanner alerts.")
+    print("Early setup groups mirror provisional scanner alerts; outcomes are descriptive, not trade results.")
     return 0
 
 
