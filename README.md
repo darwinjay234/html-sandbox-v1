@@ -101,7 +101,7 @@ Every successful live scan saves market observations and the resulting decision 
 
 Rows are deduplicated by coin, timeframe, and candle timestamp, so the rolling 250-day and 30-day API windows do not get copied into the CSV on every run. Set `CRYPTO_HISTORY_DIR` to choose another local output directory. The generated `data/history/` files are git-ignored.
 
-The GitHub Actions workflow restores and updates the history through its cache so its normally temporary runner can carry the CSVs forward between scans. Caches are a convenient starter store, not a permanent archive; download the CSVs periodically if you need a durable backup. Locally run `python crypto_scanner.py --watchlist` to collect live history, or `python crypto_scanner.py --coin bitcoin` for one coin. Mock runs only add decision rows and never add synthetic candles to market history.
+After each successful GitHub Actions watchlist run, the workflow commits the updated CSVs to `main`, so later hourly runs start with the accumulated history and the files can be viewed in the repository. The workflow requests `contents: write` for its `GITHUB_TOKEN`. Local `data/history/` files remain git-ignored. Locally run `python crypto_scanner.py --watchlist` to collect live history, or `python crypto_scanner.py --coin bitcoin` for one coin. Mock runs only add decision rows and never add synthetic candles to market history.
 
 ### 1. Scan a Single Live Asset
 Scan **Solana** on real-time market data:
