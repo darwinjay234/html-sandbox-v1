@@ -103,6 +103,20 @@ Rows are deduplicated by coin, timeframe, and candle timestamp, so the rolling 2
 
 After each successful GitHub Actions watchlist run, the workflow commits the updated CSVs to `main`, so later hourly runs start with the accumulated history and the files can be viewed in the repository. The workflow requests `contents: write` for its `GITHUB_TOKEN`. Local `data/history/` files remain git-ignored. Locally run `python crypto_scanner.py --watchlist` to collect live history, or `python crypto_scanner.py --coin bitcoin` for one coin. Mock runs only add decision rows and never add synthetic candles to market history.
 
+## Reviewing signal follow-through
+
+After this script is merged and the history-commit workflow has run, sync `main` so the local CSVs match GitHub, then run the analysis script from the project root:
+
+```powershell
+git switch main
+git pull
+.\.venv\Scripts\python.exe analyze_scan_history.py
+```
+
+It matches each successful CoinGecko scan to the first later closed 4-hour candle at or after 4, 12, and 24 hours, allowing up to one additional 4-hour candle for the coarse interval. It writes `data/analysis/forward_returns.csv` (one row per scan and horizon, including pending outcomes) and `data/analysis/analysis_summary.csv` (results by coin, buy/sell score, alert state, and exploratory early-momentum cohort). Use `--history-dir` or `--output-dir` to select different folders.
+
+The early-momentum cohort is exploratory: buy score 4–6, BTC above its 200-day EMA, bullish EMA alignment, and either the existing MACD or volume/OBV condition. It does not change scanner alerts. Outcomes are descriptive price returns, not simulated trading profits; they exclude fees, slippage, position size, and overlapping hourly observations. The summary also reports positive price-return rate separately from directional win rate so a SELL signal is evaluated against falling prices. Wait until forward candles exist before drawing conclusions.
+
 ### 1. Scan a Single Live Asset
 Scan **Solana** on real-time market data:
 ```powershell

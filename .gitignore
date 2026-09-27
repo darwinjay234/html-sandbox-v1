@@ -15,6 +15,7 @@ chat_history.md
 
 # Locally collected market and scan history
 data/history/
+data/analysis/
 
 # System configuration folders
 .antigravitycli/
